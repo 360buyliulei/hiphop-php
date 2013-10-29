@@ -48,6 +48,7 @@
 #include "hphp/runtime/vm/php-debug.h"
 #include "hphp/runtime/vm/debugger-hook.h"
 #include "hphp/runtime/vm/runtime.h"
+#include "hphp/runtime/vm/runtime-type-profiler.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/vm/type-constraint.h"
 #include "hphp/runtime/vm/unwind.h"
@@ -1260,10 +1261,14 @@ Array VMExecutionContext::getCallerInfo() {
   return result;
 }
 
-VarEnv* VMExecutionContext::getVarEnv() {
+VarEnv* VMExecutionContext::getVarEnv(int frame) {
   VMRegAnchor _;
 
   ActRec* fp = getFP();
+  for (; frame > 0; --frame) {
+    if (!fp) break;
+    fp = getPrevVMState(fp);
+  }
   if (UNLIKELY(!fp)) return NULL;
   if (fp->skipFrame()) {
     fp = getPrevVMState(fp);
@@ -4223,6 +4228,9 @@ OPTBLD_INLINE void VMExecutionContext::iopRetC(PC& pc) {
   // the same regardless of whether the return value is boxed or not.
   TypedValue* retval_ptr = &m_fp->m_r;
   memcpy(retval_ptr, m_stack.topTV(), sizeof(TypedValue));
+  if (RuntimeOption::EvalRuntimeTypeProfile) {
+    profileOneArgument(*retval_ptr, -1, m_fp->m_func);
+  }
   // Adjust the stack
   m_stack.ndiscard(m_fp->m_func->numSlotsInFrame() + 1);
 
@@ -5861,6 +5869,9 @@ OPTBLD_INLINE void VMExecutionContext::iopFCall(PC& pc) {
   assert(numArgs == ar->numArgs());
   checkStack(m_stack, ar->m_func);
   doFCall(ar, pc);
+  if (RuntimeOption::EvalRuntimeTypeProfile) {
+    profileAllArguments(ar);
+  }
 }
 
 OPTBLD_INLINE void VMExecutionContext::iopFCallBuiltin(PC& pc) {

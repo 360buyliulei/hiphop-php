@@ -542,6 +542,7 @@ O(InterpOneCF,               D(StkPtr), S(FramePtr) S(StkPtr),                \
                                                            T|E|N|Mem|Refs|Er) \
 O(Spill,                       DofS(0), SUnk,                            Mem) \
 O(Reload,                      DofS(0), SUnk,                            Mem) \
+O(Shuffle,                          ND, SUnk,                            Mem) \
 O(CreateContFunc,               D(Obj), NA,                          E|N|PRc) \
 O(CreateContMeth,               D(Obj), S(Ctx),                      E|N|PRc) \
 O(ContEnter,                        ND, S(FramePtr)                           \
@@ -784,7 +785,7 @@ O(EmptyElem,                   D(Bool), C(TCA)                                \
                                           S(Cell)                             \
                                           S(PtrToCell),      E|N|Mem|Refs|Er) \
 O(IncStat,                          ND, C(Int) C(Int) C(Bool),         E|Mem) \
-O(TypeProfileFunc,                  ND, S(Gen),                          E|N) \
+O(TypeProfileFunc,                  ND, S(Gen) S(Func),                  E|N) \
 O(IncStatGrouped,                   ND, CStr CStr C(Int),            E|N|Mem) \
 O(RBTrace,                          ND, NA,                              E|N) \
 O(IncTransCounter,                  ND, NA,                                E) \

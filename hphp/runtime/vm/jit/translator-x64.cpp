@@ -98,7 +98,7 @@
 #include "hphp/runtime/vm/member-operations.h"
 #include "hphp/runtime/vm/jit/abi-x64.h"
 #include "hphp/runtime/vm/jit/check.h"
-#include "hphp/runtime/vm/jit/code-gen.h"
+#include "hphp/runtime/vm/jit/code-gen-x64.h"
 #include "hphp/runtime/vm/jit/hhbc-translator.h"
 #include "hphp/runtime/vm/jit/ir-translator.h"
 #include "hphp/runtime/vm/jit/normalized-instruction.h"
@@ -128,7 +128,6 @@ namespace Transl {
 using namespace reg;
 using namespace Util;
 using namespace Trace;
-using namespace JIT::X64;
 using std::max;
 
 #define TRANS_PERF_COUNTERS \
@@ -274,6 +273,7 @@ bool TranslatorX64::prologuesWereRegenerated(const Func* func) {
 TCA TranslatorX64::retranslateOpt(TransID transId, bool align) {
   LeaseHolder writer(s_writeLease);
   if (!writer) return nullptr;
+  if (isDebuggerAttachedProcess()) return nullptr;
 
   TRACE(1, "retranslateOpt: transId = %u\n", transId);
 
@@ -326,7 +326,7 @@ TCA TranslatorX64::retranslateOpt(TransID transId, bool align) {
       translArgs.setFuncBody();
       setFuncBody = false;
     }
-    TCA regionStart = retranslate(translArgs);
+    TCA regionStart = translate(translArgs);
     if (funcStart == nullptr) {
       assert(regionStart);
       funcStart = regionStart;
@@ -500,7 +500,7 @@ TranslatorX64::translate(const TranslArgs& args) {
                            .hot(func->attrs() & AttrHot));
 
   if (args.m_align) {
-    moveToAlign(mainCode, kNonFallthroughAlign);
+    JIT::X64::moveToAlign(mainCode, kNonFallthroughAlign);
   }
 
   TCA start = mainCode.frontier();
@@ -541,7 +541,7 @@ TranslatorX64::getCallArrayPrologue(Func* func) {
     if (!writer) return nullptr;
     tca = func->getFuncBody();
     if (tca != uniqueStubs.funcBodyHelperThunk) return tca;
-    tca = emitCallArrayPrologue(func, dvs);
+    tca = JIT::X64::emitCallArrayPrologue(func, dvs);
     func->setFuncBody(tca);
   } else {
     SrcKey sk(func, func->base());
@@ -702,7 +702,7 @@ TranslatorX64::getFuncPrologue(Func* func, int nPassed, ActRec* ar) {
   // If we're close to a cache line boundary, just burn some space to
   // try to keep the func and its body on fewer total lines.
   if (((uintptr_t)mainCode.frontier() & kX64CacheLineMask) >= 32) {
-    moveToAlign(mainCode, kX64CacheLineSize);
+    JIT::X64::moveToAlign(mainCode, kX64CacheLineSize);
   }
 
   // Careful: this isn't necessarily the real entry point. For funcIsMagic
@@ -920,6 +920,8 @@ TranslatorX64::bindJmpccFirst(TCA toSmash,
   Asm as { cb };
   // Its not clear where chainFrom should go to if as is astubs
   assert(&cb != &stubsCode);
+
+  using namespace JIT::X64;
 
   // can we just directly fall through?
   // a jmp + jz takes 5 + 6 = 11 bytes
@@ -1875,14 +1877,28 @@ TranslatorX64::translateWork(const TranslArgs& args) {
     TRACE(1,
           "emitting %d-instr interp request for failed translation\n",
           int(tp->m_numOpcodes));
-    Asm a { mainCode };
-    Asm astubs { stubsCode };
-    // Add a counter for the translation if requested
-    if (RuntimeOption::EvalJitTransCounters) {
-      emitTransCounterInc(a);
+    if (JIT::arch() == JIT::Arch::X64) {
+      Asm a { mainCode };
+      // Add a counter for the translation if requested
+      if (RuntimeOption::EvalJitTransCounters) {
+        JIT::X64::emitTransCounterInc(a);
+      }
+      a.    jmp(emitServiceReq(stubsCode, JIT::REQ_INTERPRET,
+                               sk.offset(), tp ? tp->m_numOpcodes : 1));
+    } else if (JIT::arch() == JIT::Arch::ARM) {
+      if (RuntimeOption::EvalJitTransCounters) {
+        vixl::MacroAssembler a { mainCode };
+        JIT::ARM::emitTransCounterInc(a);
+      }
+      // This jump won't be smashed, but a far jump on ARM requires the same
+      // code sequence.
+      JIT::emitSmashableJump(
+        mainCode,
+        emitServiceReq(stubsCode, JIT::REQ_INTERPRET,
+                       sk.offset(), tp ? tp->m_numOpcodes : 1),
+        CC_None
+      );
     }
-    a.    jmp(emitServiceReq(stubsCode, JIT::REQ_INTERPRET,
-                             sk.offset(), tp ? tp->m_numOpcodes : 1));
     // Fall through.
   }
 

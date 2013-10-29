@@ -330,6 +330,7 @@ PUNT_OPCODE(ArrayAdd)
 PUNT_OPCODE(AKExists)
 PUNT_OPCODE(Spill)
 PUNT_OPCODE(Reload)
+PUNT_OPCODE(Shuffle)
 PUNT_OPCODE(CreateContFunc)
 PUNT_OPCODE(CreateContMeth)
 PUNT_OPCODE(ContEnter)
@@ -444,7 +445,7 @@ PUNT_OPCODE(DbgAssertType)
 template<class Loc, class JmpFn>
 void CodeGenerator::emitTypeTest(Type type, Loc typeSrc, Loc dataSrc,
                                  JmpFn doJcc) {
-  assert(!type.subtypeOf(Type::Cls));
+  assert(!(type <= Type::Cls));
 
   if (type.equals(Type::Gen)) {
     return;
@@ -484,7 +485,7 @@ void CodeGenerator::emitTypeTest(Type type, Loc typeSrc, Loc dataSrc,
     m_as.   Ldr   (rAsm, rAsm[ObjectData::getVMClassOffset()]);
     m_as.   Cmp   (rAsm, reinterpret_cast<int64_t>(type.getClass()));
     doJcc(CC_E);
-  } else if (type.subtypeOf(Type::Arr) && type.hasArrayKind()) {
+  } else if (type <= Type::Arr && type.hasArrayKind()) {
     m_as.   Ldr   (rAsm, dataSrc);
     m_as.   Ldrb  (rAsm.W(), rAsm[ArrayData::offsetofKind()]);
     m_as.   Cmp   (rAsm.W(), type.getArrayKind());

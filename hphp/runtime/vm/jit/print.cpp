@@ -23,7 +23,7 @@
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/vm/jit/ir.h"
 #include "hphp/runtime/vm/jit/linear-scan.h"
-#include "hphp/runtime/vm/jit/code-gen.h"
+#include "hphp/runtime/vm/jit/code-gen-x64.h"
 #include "hphp/runtime/vm/jit/block.h"
 #include "hphp/runtime/vm/jit/ir-trace.h"
 
@@ -61,31 +61,31 @@ static std::string constToString(Type t, const ConstData* c) {
     } else {
       os << "Array(" << arr << ")";
     }
-  } else if (t.isNull() || t.subtypeOf(Type::Nullptr)) {
+  } else if (t.isNull() || t <= Type::Nullptr) {
     os << t.toString();
-  } else if (t.subtypeOf(Type::Func)) {
+  } else if (t <= Type::Func) {
     auto func = c->as<const Func*>();
     os << "Func(" << (func ? func->fullName()->data() : "0") << ")";
-  } else if (t.subtypeOf(Type::Cls)) {
+  } else if (t <= Type::Cls) {
     auto cls = c->as<const Class*>();
     os << "Cls(" << (cls ? cls->name()->data() : "0") << ")";
-  } else if (t.subtypeOf(Type::Cctx)) {
+  } else if (t <= Type::Cctx) {
     auto cls = reinterpret_cast<const Class*>(c->as<uintptr_t>() - 1);
     os << "Cctx(" << (cls ? cls->name()->data() : "0") << ")";
-  } else if (t.subtypeOf(Type::NamedEntity)) {
+  } else if (t <= Type::NamedEntity) {
     auto ne = c->as<const NamedEntity*>();
     os << "NamedEntity(" << ne << ")";
-  } else if (t.subtypeOf(Type::TCA)) {
+  } else if (t <= Type::TCA) {
     TCA tca = c->as<TCA>();
     auto name = getNativeFunctionName(tca);
     SCOPE_EXIT { free(name); };
     os << folly::format("TCA: {}({})", tca,
       boost::trim_copy(std::string(name)));
-  } else if (t.subtypeOf(Type::None)) {
+  } else if (t <= Type::None) {
     os << "None:" << c->as<int64_t>();
   } else if (t.isPtr()) {
     os << folly::format("{}({:#x})", t.toString(), c->as<uint64_t>());
-  } else if (t.subtypeOf(Type::RDSHandle)) {
+  } else if (t <= Type::RDSHandle) {
     os << folly::format("RDS::Handle({:#x})", c->as<int64_t>());
   } else {
     not_reached();
@@ -137,8 +137,8 @@ void printOpcode(std::ostream& os, const IRInstruction* inst,
      << color(ANSI_COLOR_END);
 }
 
-const RegisterInfo* regInfo(const RegAllocInfo* regs,
-                            const IRInstruction* inst, const SSATmp* t) {
+const PhysLoc* loc(const RegAllocInfo* regs,
+                   const IRInstruction* inst, const SSATmp* t) {
   return regs ? &(*regs)[inst][t] : nullptr;
 }
 
@@ -149,7 +149,7 @@ void printDst(std::ostream& os, const IRInstruction* inst,
   const char* sep = "";
   for (const SSATmp& dst : inst->dsts()) {
     os << punc(sep);
-    print(os, &dst, regInfo(regs, inst, &dst), lifetime, true);
+    print(os, &dst, loc(regs, inst, &dst), lifetime, true);
     sep = ", ";
   }
   os << punc(" = ");
@@ -163,7 +163,7 @@ void printSrc(std::ostream& ostream, const IRInstruction* inst, uint32_t i,
         lifetime->uses[src].lastUse == lifetime->linear[inst]) {
       ostream << "~";
     }
-    print(ostream, src, regInfo(regs, inst, src), lifetime);
+    print(ostream, src, loc(regs, inst, src), lifetime);
   } else {
     ostream << color(ANSI_COLOR_RED)
             << "!!!NULL @ " << i
@@ -235,7 +235,44 @@ void print(const IRInstruction* inst) {
   std::cerr << std::endl;
 }
 
-void print(std::ostream& os, const SSATmp* tmp, const RegisterInfo* regInfo,
+std::ostream& operator<<(std::ostream& os, const PhysLoc& loc) {
+  auto sz = loc.numAllocatedRegs();
+  if (!sz) return os;
+  os << '(';
+  auto delim = "";
+  for (int i = 0; i < sz; ++i) {
+    if (!loc.spilled()) {
+      PhysReg reg = loc.reg(i);
+      auto name = reg.type() == PhysReg::GP ? reg::regname(Reg64(reg)) :
+                  reg::regname(RegXMM(reg));
+      os << delim << name;
+    } else {
+      os << delim << "spill[" << loc.slot(i) << "]";
+    }
+    delim = ",";
+  }
+  os << ')';
+  return os;
+}
+
+void printPhysLoc(std::ostream& os, const PhysLoc& loc) {
+  if (loc.numAllocatedRegs() > 0) {
+    os << color(ANSI_COLOR_BROWN) << loc << color(ANSI_COLOR_END);
+  }
+}
+
+std::string ShuffleData::show() const {
+  std::ostringstream os;
+  auto delim = "";
+  for (unsigned i = 0; i < size; ++i) {
+    os << delim;
+    printPhysLoc(os, dests[i]);
+    delim = ",";
+  }
+  return os.str();
+}
+
+void print(std::ostream& os, const SSATmp* tmp, const PhysLoc* loc,
            const LifetimeInfo* lifetime, bool printLastUse) {
   if (tmp->inst()->op() == DefConst) {
     os << constToString(tmp->inst()->typeParam(),
@@ -250,27 +287,8 @@ void print(std::ostream& os, const SSATmp* tmp, const RegisterInfo* regInfo,
        << "@" << lifetime->uses[tmp].lastUse << "#" << lifetime->uses[tmp].count
        << color(ANSI_COLOR_END);
   }
-  if (regInfo) {
-    if (regInfo->spilled() || regInfo->numAllocatedRegs() > 0) {
-      os << color(ANSI_COLOR_BROWN) << '(';
-      if (!regInfo->spilled()) {
-        for (int i = 0, sz = regInfo->numAllocatedRegs(); i < sz; ++i) {
-          if (i != 0) os << ",";
-          PhysReg r = regInfo->reg(i);
-          if (r.type() == PhysReg::GP) {
-            os << reg::regname(Reg64(r));
-          } else {
-            os << reg::regname(RegXMM(r));
-          }
-        }
-      } else {
-        for (int i = 0, sz = tmp->numNeededRegs(); i < sz; ++i) {
-          if (i != 0) os << ",";
-          os << regInfo->spillInfo(i);
-        }
-      }
-      os << ')' << color(ANSI_COLOR_END);
-    }
+  if (loc) {
+    printPhysLoc(os, *loc);
   }
   os << punc(":")
      << color(ANSI_COLOR_GREEN)
@@ -439,7 +457,7 @@ void print(std::ostream& os, const Block* block,
                           folly::format("({}) ", inst.id()).str().size(),
                           ' ');
         auto dst = inst.dst(i);
-        JIT::print(os, dst, regInfo(regs, &inst, dst), lifetime, false);
+        JIT::print(os, dst, loc(regs, &inst, dst), lifetime, false);
         os << punc(" = ") << color(ANSI_COLOR_CYAN) << "phi "
            << color(ANSI_COLOR_END);
         bool first = true;
